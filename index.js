@@ -33,16 +33,16 @@ client.once(Events.ClientReady, async () => {
 
   const commands = [
     new SlashCommandBuilder()
-      .setName('post-button')
-      .setDescription('Post the bug report button in this channel')
+        .setName('post-button')
+        .setDescription('Post the bug report button in this channel')
   ].map(command => command.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
   try {
     await rest.put(
-      Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
-      { body: commands }
+        Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
+        { body: commands }
     );
     console.log('Slash command /post-button registered');
   } catch (error) {
@@ -56,11 +56,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // /post-button command
   if (interaction.isChatInputCommand() && interaction.commandName === 'post-button') {
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('report_bug')
-        .setLabel('Report a Bug / Crash')
-        .setStyle(ButtonStyle.Danger)
-        .setEmoji('🐛')
+        new ButtonBuilder()
+            .setCustomId('report_bug')
+            .setLabel('Report a Bug / Crash')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('🐛')
     );
 
     await interaction.reply({
@@ -73,27 +73,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Button clicked → show simplified form
   if (interaction.isButton() && interaction.customId === 'report_bug') {
     const modal = new ModalBuilder()
-      .setCustomId('bug_modal')
-      .setTitle('Report a Bug / Crash');
+        .setCustomId('bug_modal')
+        .setTitle('Report a Bug / Crash');
 
     const descriptionInput = new TextInputBuilder()
-      .setCustomId('description')
-      .setLabel('What happened?')
-      .setStyle(TextInputStyle.Paragraph)
-      .setRequired(true)
-      .setPlaceholder('Describe the bug or crash in your own words...')
-      .setMaxLength(1800);
+        .setCustomId('description')
+        .setLabel('What happened?')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setPlaceholder('Describe the bug or crash in your own words...')
+        .setMaxLength(1800);
 
     const platformInput = new TextInputBuilder()
-      .setCustomId('platform')
-      .setLabel('Platform / Version (optional)')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(false)
-      .setPlaceholder('e.g. Steam, Windows, v1.0.3');
+        .setCustomId('platform')
+        .setLabel('Platform / Version (optional)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setPlaceholder('e.g. Steam, Windows, v1.0.3');
 
     modal.addComponents(
-      new ActionRowBuilder().addComponents(descriptionInput),
-      new ActionRowBuilder().addComponents(platformInput)
+        new ActionRowBuilder().addComponents(descriptionInput),
+        new ActionRowBuilder().addComponents(platformInput)
     );
 
     await interaction.showModal(modal);
@@ -204,8 +204,8 @@ Reporter: ${reporter}
       const openIssues = searchData.data?.issues?.nodes || [];
 
       if (openIssues.length > 0) {
-        const issuesList = openIssues.map((issue, i) => 
-          `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 300)}`
+        const issuesList = openIssues.map((issue, i) =>
+            `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 300)}`
         ).join('\n\n');
 
         const duplicatePrompt = `
@@ -388,8 +388,8 @@ ${analysis.summary}
       });
 
       const replyText = isUpdate
-        ? '✅ Thanks! This looks related to an existing report — your extra info has been added.'
-        : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.';
+          ? '✅ Thanks! This looks related to an existing report — your extra info has been added.'
+          : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.';
 
       await interaction.editReply({ content: replyText });
 
@@ -417,13 +417,36 @@ client.on(Events.MessageCreate, async (message) => {
     mediaLinks.push(`- [${att.name}](${att.url})`);
   });
 
-  const newDescription = `${pending.originalSummary}
+  try {
+    // 1. First get the current description from Linear
+    const getQuery = `
+      query {
+        issue(id: "${pending.issueId}") {
+          description
+        }
+      }
+    `;
+
+    const getRes = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Authorization': process.env.LINEAR_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ query: getQuery })
+    });
+
+    const getData = await getRes.json();
+    const currentDescription = getData.data?.issue?.description || '';
+
+    // 2. Only append the media links (never overwrite)
+    const newDescription = `${currentDescription}
 
 ---
-**Media Attachments:**
+**Media:**
 ${mediaLinks.join('\n')}`;
 
-  try {
+    // 3. Update the issue
     const updateMutation = `
       mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
         issueUpdate(id: $id, input: $input) {
@@ -432,7 +455,7 @@ ${mediaLinks.join('\n')}`;
       }
     `;
 
-    const res = await fetch('https://api.linear.app/graphql', {
+    const updateRes = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
       headers: {
         'Authorization': process.env.LINEAR_API_KEY,
@@ -449,10 +472,10 @@ ${mediaLinks.join('\n')}`;
       })
     });
 
-    const data = await res.json();
-    if (data.errors) throw new Error(JSON.stringify(data.errors));
+    const updateData = await updateRes.json();
+    if (updateData.errors) throw new Error(JSON.stringify(updateData.errors));
 
-    await message.reply('✅ Media successfully added to your report. Thank you!');
+    await message.reply('✅ Media added to the report. Thank you!');
 
     clearTimeout(pending.timeout);
     pendingMedia.delete(message.channel.id);
