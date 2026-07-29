@@ -311,7 +311,7 @@ ${mediaLinks.join('\n')}`;
         query: updateMutation,
         variables: {
           id: pending.issueId,
-          input: {
+          input: { 
             description: newDescription
           }
         }
