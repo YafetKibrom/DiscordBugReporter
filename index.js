@@ -5,8 +5,17 @@ const {
 } = require('discord.js');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,     // ← needed to read attachments
+    GatewayIntentBits.GuildMessageTyping  // optional but useful
+  ]
 });
+
+// Temporary storage for media uploads
+// Key = threadId, Value = { issueId, timeout }
+const pendingMedia = new Map();
 
 // ========== REGISTER SLASH COMMAND ==========
 client.once(Events.ClientReady, async () => {
@@ -208,9 +217,38 @@ Reporter: ${reporter}
         throw new Error(JSON.stringify(linearData.errors));
       }
 
-      // Clean thank you message (no Linear link)
+      const issueId = linearData.data.issueCreate.issue.id;
+
+// Create a private thread for media
+      const thread = await interaction.channel.threads.create({
+        name: `media-${interaction.user.username}`.slice(0, 90),
+        autoArchiveDuration: 60,
+        type: 12, // Private thread
+        invitable: false,
+        reason: 'Bug report media upload'
+      });
+
+// Add the reporter to the private thread
+      await thread.members.add(interaction.user.id);
+
+// Ask for media
+      await thread.send({
+        content: `${interaction.user} Please upload any screenshots or videos here.\nYou have **5 minutes**.`
+      });
+
+// Store everything we need for later
+      pendingMedia.set(thread.id, {
+        issueId: issueId,
+        originalSummary: analysis.summary,
+        timeout: setTimeout(() => {
+          pendingMedia.delete(thread.id);
+          thread.setArchived(true).catch(() => {});
+        }, 5 * 60 * 1000) // 5 minutes
+      });
+
+// Clean reply to the user
       await interaction.editReply({
-        content: '✅ Thanks for the report! We’ve received it.'
+        content: '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.'
       });
 
     } catch (err) {
@@ -219,6 +257,73 @@ Reporter: ${reporter}
         content: '⚠️ Something went wrong while saving your report. Please try again later.'
       });
     }
+  }
+});
+
+// Listen for media uploads in private threads
+client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot) return;
+  if (!message.channel.isThread()) return;
+
+  const pending = pendingMedia.get(message.channel.id);
+  if (!pending) return;
+
+  // Ignore messages with no attachments
+  if (message.attachments.size === 0) return;
+
+  const mediaLinks = [];
+  message.attachments.forEach(att => {
+    mediaLinks.push(`- [${att.name}](${att.url})`);
+  });
+
+  const newDescription = `${pending.originalSummary}
+
+---
+**Media Attachments:**
+${mediaLinks.join('\n')}`;
+
+  try {
+    const updateMutation = `
+      mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+          success
+        }
+      }
+    `;
+
+    const res = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Authorization': process.env.LINEAR_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: updateMutation,
+        variables: {
+          id: pending.issueId,
+          input: {
+            description: newDescription
+          }
+        }
+      })
+    });
+
+    const data = await res.json();
+
+    if (data.errors) {
+      throw new Error(JSON.stringify(data.errors));
+    }
+
+    await message.reply('✅ Media successfully added to your report. Thank you!');
+
+    // Cleanup
+    clearTimeout(pending.timeout);
+    pendingMedia.delete(message.channel.id);
+    await message.channel.setArchived(true);
+
+  } catch (err) {
+    console.error('Failed to update Linear with media:', err);
+    await message.reply('⚠️ Sorry, I could not attach the media to the report.');
   }
 });
 
