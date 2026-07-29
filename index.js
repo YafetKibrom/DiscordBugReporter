@@ -120,8 +120,7 @@ Reply ONLY with valid JSON in this exact format:
   "subcategory": "UI/Visual" or "AI" or "Gameplay" or null,
   "priority": 1 or 2 or 3 or 4,
   "cleanTitle": "short clear title under 80 characters",
-  "summary": "Clean markdown description. Include: What happened, possible steps to reproduce if you can guess them, and platform.",
-  "searchKeywords": "3 to 6 important keywords from the report for searching duplicates"
+  "summary": "Clean markdown description. Include: What happened, possible steps to reproduce if you can guess them, and platform."
 }
 
 Rules:
@@ -166,54 +165,50 @@ Reporter: ${reporter}
         subcategory: 'Gameplay',
         priority: 3,
         cleanTitle: description.slice(0, 70),
-        summary: `**Reporter:** ${reporter}\n\n**Description:**\n${description}\n\n**Platform:** ${platform}`,
-        searchKeywords: description.split(' ').slice(0, 5).join(' ')
+        summary: `**Reporter:** ${reporter}\n\n**Description:**\n${description}\n\n**Platform:** ${platform}`
       };
     }
 
-    // ===== SEARCH FOR DUPLICATES =====
     // ===== SMART DUPLICATE CHECK WITH AI =====
-let existingIssue = null;
+    let existingIssue = null;
 
-try {
-  // 1. Get open issues from Linear
-  const searchQuery = `
-    query {
-      issues(
-        filter: {
-          team: { id: { eq: "${process.env.LINEAR_TEAM_ID}" } }
-          state: { type: { nin: ["completed", "canceled"] } }
+    try {
+      const searchQuery = `
+        query {
+          issues(
+            filter: {
+              team: { id: { eq: "${process.env.LINEAR_TEAM_ID}" } }
+              state: { type: { nin: ["completed", "canceled"] } }
+            }
+            first: 40
+          ) {
+            nodes {
+              id
+              title
+              description
+            }
+          }
         }
-        first: 40
-      ) {
-        nodes {
-          id
-          title
-          description
-        }
-      }
-    }
-  `;
+      `;
 
-  const searchRes = await fetch('https://api.linear.app/graphql', {
-    method: 'POST',
-    headers: {
-      'Authorization': process.env.LINEAR_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ query: searchQuery })
-  });
+      const searchRes = await fetch('https://api.linear.app/graphql', {
+        method: 'POST',
+        headers: {
+          'Authorization': process.env.LINEAR_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query: searchQuery })
+      });
 
-  const searchData = await searchRes.json();
-  const openIssues = searchData.data?.issues?.nodes || [];
+      const searchData = await searchRes.json();
+      const openIssues = searchData.data?.issues?.nodes || [];
 
-  if (openIssues.length > 0) {
-    // 2. Ask AI if this report matches any existing issue
-    const issuesList = openIssues.map((issue, i) => 
-      `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 280)}`
-    ).join('\n\n');
+      if (openIssues.length > 0) {
+        const issuesList = openIssues.map((issue, i) => 
+          `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 300)}`
+        ).join('\n\n');
 
-    const duplicatePrompt = `
+        const duplicatePrompt = `
 You are a bug triage expert.
 
 Here is a NEW bug report:
@@ -226,11 +221,11 @@ ${issuesList}
 Question: Does the NEW report describe the same underlying bug as any of the open issues above?
 
 Rules:
-- Answer based on the core problem, not exact wording.
-- Small extra details (location, timing, etc.) do not make it a different bug.
-- Only return a match if you are reasonably confident they are the same issue.
+- Focus on the core problem, not exact wording.
+- Extra details (location, timing, specific circumstances) do NOT make it a different bug.
+- Only match if you are reasonably confident they are the same issue.
 
-Reply with ONLY valid JSON in this format:
+Reply with ONLY valid JSON in this exact format:
 {
   "isDuplicate": true or false,
   "matchingIssueId": "the ID of the matching issue or null",
@@ -238,172 +233,174 @@ Reply with ONLY valid JSON in this format:
 }
 `;
 
-    const dupRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: duplicatePrompt }],
-        temperature: 0.1
-      })
-    });
+        const dupRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile',
+            messages: [{ role: 'user', content: duplicatePrompt }],
+            temperature: 0.1
+          })
+        });
 
-    const dupData = await dupRes.json();
-    const dupRaw = dupData.choices[0].message.content;
-    const dupJson = JSON.parse(dupRaw.match(/\{[\s\S]*\}/)[0]);
+        const dupData = await dupRes.json();
+        const dupRaw = dupData.choices[0].message.content;
+        const dupJson = JSON.parse(dupRaw.match(/\{[\s\S]*\}/)[0]);
 
-    if (dupJson.isDuplicate && dupJson.matchingIssueId) {
-      existingIssue = openIssues.find(i => i.id === dupJson.matchingIssueId);
-      console.log(`AI detected duplicate: ${dupJson.reason}`);
+        if (dupJson.isDuplicate && dupJson.matchingIssueId) {
+          existingIssue = openIssues.find(i => i.id === dupJson.matchingIssueId);
+          console.log(`AI detected duplicate → ${dupJson.reason}`);
+        }
+      }
+    } catch (err) {
+      console.error('Smart duplicate check error:', err);
     }
-  }
-} catch (err) {
-  console.error('Smart duplicate check error:', err);
-}
 
-// ===== CREATE OR UPDATE ISSUE =====
-try {
-  const labelMap = {
-    'AI': '350d1237-1fd2-4cdf-8261-99bc677536ea',
-    'Bug': '853c01a9-78a2-44f8-a676-e21d8a6ab11b',
-    'Crash': '5ff9619b-e2ff-497e-9e3d-c4b194f1d29a',
-    'Gameplay': '28dc65d1-2ada-4388-9a62-ce53ba7c6968',
-    'UI/Visual': '1b410362-2d0d-4015-b72a-c5e7e7143ac5'
-  };
+    // ===== CREATE OR UPDATE ISSUE =====
+    try {
+      const labelMap = {
+        'AI': '350d1237-1fd2-4cdf-8261-99bc677536ea',
+        'Bug': '853c01a9-78a2-44f8-a676-e21d8a6ab11b',
+        'Crash': '5ff9619b-e2ff-497e-9e3d-c4b194f1d29a',
+        'Gameplay': '28dc65d1-2ada-4388-9a62-ce53ba7c6968',
+        'UI/Visual': '1b410362-2d0d-4015-b72a-c5e7e7143ac5'
+      };
 
-  const labelIds = [];
-  if (analysis.type === 'Crash') {
-    labelIds.push(labelMap['Crash']);
-  } else {
-    labelIds.push(labelMap['Bug']);
-    if (analysis.subcategory && labelMap[analysis.subcategory]) {
-      labelIds.push(labelMap[analysis.subcategory]);
-    }
-  }
+      const labelIds = [];
+      if (analysis.type === 'Crash') {
+        labelIds.push(labelMap['Crash']);
+      } else {
+        labelIds.push(labelMap['Bug']);
+        if (analysis.subcategory && labelMap[analysis.subcategory]) {
+          labelIds.push(labelMap[analysis.subcategory]);
+        }
+      }
 
-  let issueId;
-  let isUpdate = false;
+      let issueId;
+      let isUpdate = false;
 
-  if (existingIssue) {
-    // Update existing issue
-    isUpdate = true;
-    issueId = existingIssue.id;
+      if (existingIssue) {
+        // Update existing issue
+        isUpdate = true;
+        issueId = existingIssue.id;
 
-    const updatedDescription = `${existingIssue.description || ''}
+        const updatedDescription = `${existingIssue.description || ''}
 
 ---
 **Additional report by ${reporter}:**
 ${analysis.summary}
 `;
 
-    const updateMutation = `
-      mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
-        issueUpdate(id: $id, input: $input) {
-          success
-        }
+        const updateMutation = `
+          mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) {
+              success
+            }
+          }
+        `;
+
+        const updateRes = await fetch('https://api.linear.app/graphql', {
+          method: 'POST',
+          headers: {
+            'Authorization': process.env.LINEAR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: updateMutation,
+            variables: {
+              id: issueId,
+              input: {
+                description: updatedDescription
+              }
+            }
+          })
+        });
+
+        const updateData = await updateRes.json();
+        if (updateData.errors) throw new Error(JSON.stringify(updateData.errors));
+
+      } else {
+        // Create new issue
+        const createMutation = `
+          mutation IssueCreate($input: IssueCreateInput!) {
+            issueCreate(input: $input) {
+              success
+              issue {
+                id
+                title
+                url
+              }
+            }
+          }
+        `;
+
+        const createRes = await fetch('https://api.linear.app/graphql', {
+          method: 'POST',
+          headers: {
+            'Authorization': process.env.LINEAR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: createMutation,
+            variables: {
+              input: {
+                teamId: process.env.LINEAR_TEAM_ID,
+                title: analysis.cleanTitle,
+                description: analysis.summary,
+                priority: analysis.priority,
+                labelIds: labelIds
+              }
+            }
+          })
+        });
+
+        const createData = await createRes.json();
+        if (createData.errors) throw new Error(JSON.stringify(createData.errors));
+
+        issueId = createData.data.issueCreate.issue.id;
       }
-    `;
 
-    const updateRes = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Authorization': process.env.LINEAR_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query: updateMutation,
-        variables: {
-          id: issueId,
-          input: {
-            description: updatedDescription
-          }
-        }
-      })
-    });
+      // ===== CREATE PRIVATE THREAD FOR MEDIA =====
+      const thread = await interaction.channel.threads.create({
+        name: `media-${interaction.user.username}`.slice(0, 90),
+        autoArchiveDuration: 60,
+        type: ChannelType.PrivateThread,
+        invitable: false,
+        reason: 'Bug report media upload'
+      });
 
-    const updateData = await updateRes.json();
-    if (updateData.errors) throw new Error(JSON.stringify(updateData.errors));
+      await thread.members.add(interaction.user.id);
 
-  } else {
-    // Create new issue
-    const createMutation = `
-      mutation IssueCreate($input: IssueCreateInput!) {
-        issueCreate(input: $input) {
-          success
-          issue {
-            id
-            title
-            url
-          }
-        }
-      }
-    `;
+      await thread.send({
+        content: `${interaction.user} Please upload any screenshots or videos here.\nYou have **5 minutes**.`
+      });
 
-    const createRes = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Authorization': process.env.LINEAR_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query: createMutation,
-        variables: {
-          input: {
-            teamId: process.env.LINEAR_TEAM_ID,
-            title: analysis.cleanTitle,
-            description: analysis.summary,
-            priority: analysis.priority,
-            labelIds: labelIds
-          }
-        }
-      })
-    });
+      pendingMedia.set(thread.id, {
+        issueId: issueId,
+        originalSummary: analysis.summary,
+        timeout: setTimeout(() => {
+          pendingMedia.delete(thread.id);
+          thread.setArchived(true).catch(() => {});
+        }, 5 * 60 * 1000)
+      });
 
-    const createData = await createRes.json();
-    if (createData.errors) throw new Error(JSON.stringify(createData.errors));
+      const replyText = isUpdate
+        ? '✅ Thanks! This looks related to an existing report — your extra info has been added.'
+        : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.';
 
-    issueId = createData.data.issueCreate.issue.id;
+      await interaction.editReply({ content: replyText });
+
+    } catch (err) {
+      console.error('Linear error:', err);
+      await interaction.editReply({
+        content: '⚠️ Something went wrong while saving your report. Please try again later.'
+      });
+    }
   }
-
-  // ===== CREATE PRIVATE THREAD FOR MEDIA =====
-  const thread = await interaction.channel.threads.create({
-    name: `media-${interaction.user.username}`.slice(0, 90),
-    autoArchiveDuration: 60,
-    type: ChannelType.PrivateThread,
-    invitable: false,
-    reason: 'Bug report media upload'
-  });
-
-  await thread.members.add(interaction.user.id);
-
-  await thread.send({
-    content: `${interaction.user} Please upload any screenshots or videos here.\nYou have **5 minutes**.`
-  });
-
-  pendingMedia.set(thread.id, {
-    issueId: issueId,
-    originalSummary: analysis.summary,
-    timeout: setTimeout(() => {
-      pendingMedia.delete(thread.id);
-      thread.setArchived(true).catch(() => {});
-    }, 5 * 60 * 1000)
-  });
-
-  const replyText = isUpdate
-    ? '✅ Thanks! This looks related to an existing report — your extra info has been added.'
-    : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.';
-
-  await interaction.editReply({ content: replyText });
-
-} catch (err) {
-  console.error('Linear error:', err);
-  await interaction.editReply({
-    content: '⚠️ Something went wrong while saving your report. Please try again later.'
-  });
-}
+});
 
 // ========== MEDIA UPLOAD LISTENER ==========
 client.on(Events.MessageCreate, async (message) => {
