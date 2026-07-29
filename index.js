@@ -1,20 +1,30 @@
 require('dotenv').config();
 const {
-  Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle, Events, REST, Routes, SlashCommandBuilder
+  Client,
+  GatewayIntentBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  Events,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  ChannelType
 } = require('discord.js');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,     // ← needed to read attachments
-    GatewayIntentBits.GuildMessageTyping  // optional but useful
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageTyping
   ]
 });
 
 // Temporary storage for media uploads
-// Key = threadId, Value = { issueId, timeout }
 const pendingMedia = new Map();
 
 // ========== REGISTER SLASH COMMAND ==========
@@ -36,7 +46,7 @@ client.once(Events.ClientReady, async () => {
     );
     console.log('Slash command /post-button registered');
   } catch (error) {
-    console.error(error);
+    console.error('Failed to register slash command:', error);
   }
 });
 
@@ -162,11 +172,11 @@ Reporter: ${reporter}
     // ===== CREATE ISSUE IN LINEAR =====
     try {
       const labelMap = {
-        'AI' : '350d1237-1fd2-4cdf-8261-99bc677536ea',
-        'Bug' : '853c01a9-78a2-44f8-a676-e21d8a6ab11b',
-        'Crash' : '5ff9619b-e2ff-497e-9e3d-c4b194f1d29a',
-        'Gameplay' : '28dc65d1-2ada-4388-9a62-ce53ba7c6968',
-        'UI/Visual' : '1b410362-2d0d-4015-b72a-c5e7e7143ac5'
+        'AI': '350d1237-1fd2-4cdf-8261-99bc677536ea',
+        'Bug': '853c01a9-78a2-44f8-a676-e21d8a6ab11b',
+        'Crash': '5ff9619b-e2ff-497e-9e3d-c4b194f1d29a',
+        'Gameplay': '28dc65d1-2ada-4388-9a62-ce53ba7c6968',
+        'UI/Visual': '1b410362-2d0d-4015-b72a-c5e7e7143ac5'
       };
 
       const labelIds = [];
@@ -219,34 +229,34 @@ Reporter: ${reporter}
 
       const issueId = linearData.data.issueCreate.issue.id;
 
-// Create a private thread for media
+      // Create private thread for media
       const thread = await interaction.channel.threads.create({
         name: `media-${interaction.user.username}`.slice(0, 90),
         autoArchiveDuration: 60,
-        type: 12, // Private thread
+        type: ChannelType.PrivateThread,
         invitable: false,
         reason: 'Bug report media upload'
       });
 
-// Add the reporter to the private thread
+      // Add the user to the private thread
       await thread.members.add(interaction.user.id);
 
-// Ask for media
+      // Ask for media
       await thread.send({
         content: `${interaction.user} Please upload any screenshots or videos here.\nYou have **5 minutes**.`
       });
 
-// Store everything we need for later
+      // Store for later
       pendingMedia.set(thread.id, {
         issueId: issueId,
         originalSummary: analysis.summary,
         timeout: setTimeout(() => {
           pendingMedia.delete(thread.id);
           thread.setArchived(true).catch(() => {});
-        }, 5 * 60 * 1000) // 5 minutes
+        }, 5 * 60 * 1000)
       });
 
-// Clean reply to the user
+      // Thank the user
       await interaction.editReply({
         content: '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.'
       });
@@ -260,7 +270,7 @@ Reporter: ${reporter}
   }
 });
 
-// Listen for media uploads in private threads
+// ========== MEDIA UPLOAD LISTENER ==========
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (!message.channel.isThread()) return;
@@ -268,7 +278,6 @@ client.on(Events.MessageCreate, async (message) => {
   const pending = pendingMedia.get(message.channel.id);
   if (!pending) return;
 
-  // Ignore messages with no attachments
   if (message.attachments.size === 0) return;
 
   const mediaLinks = [];
@@ -316,7 +325,6 @@ ${mediaLinks.join('\n')}`;
 
     await message.reply('✅ Media successfully added to your report. Thank you!');
 
-    // Cleanup
     clearTimeout(pending.timeout);
     pendingMedia.delete(message.channel.id);
     await message.channel.setArchived(true);
