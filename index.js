@@ -1,5 +1,4 @@
 require('dotenv').config();
-
 const {
   Client,
   GatewayIntentBits,
@@ -34,16 +33,16 @@ client.once(Events.ClientReady, async () => {
 
   const commands = [
     new SlashCommandBuilder()
-        .setName('post-button')
-        .setDescription('Post the bug report button in this channel')
+      .setName('post-button')
+      .setDescription('Post the bug report button in this channel')
   ].map(command => command.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
   try {
     await rest.put(
-        Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
-        { body: commands }
+      Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
+      { body: commands }
     );
     console.log('Slash command /post-button registered');
   } catch (error) {
@@ -57,11 +56,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // /post-button command
   if (interaction.isChatInputCommand() && interaction.commandName === 'post-button') {
     const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId('report_bug')
-            .setLabel('Report a Bug / Crash')
-            .setStyle(ButtonStyle.Danger)
-            .setEmoji('🐛')
+      new ButtonBuilder()
+        .setCustomId('report_bug')
+        .setLabel('Report a Bug / Crash')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('🐛')
     );
 
     await interaction.reply({
@@ -74,27 +73,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Button clicked → show simplified form
   if (interaction.isButton() && interaction.customId === 'report_bug') {
     const modal = new ModalBuilder()
-        .setCustomId('bug_modal')
-        .setTitle('Report a Bug / Crash');
+      .setCustomId('bug_modal')
+      .setTitle('Report a Bug / Crash');
 
     const descriptionInput = new TextInputBuilder()
-        .setCustomId('description')
-        .setLabel('What happened?')
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setPlaceholder('Describe the bug or crash in your own words...')
-        .setMaxLength(1800);
+      .setCustomId('description')
+      .setLabel('What happened?')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setPlaceholder('Describe the bug or crash in your own words...')
+      .setMaxLength(1800);
 
     const platformInput = new TextInputBuilder()
-        .setCustomId('platform')
-        .setLabel('Platform / Version (optional)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setPlaceholder('e.g. Steam, Windows, v1.0.3');
+      .setCustomId('platform')
+      .setLabel('Platform / Version (optional)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setPlaceholder('e.g. Steam, Windows, v1.0.3');
 
     modal.addComponents(
-        new ActionRowBuilder().addComponents(descriptionInput),
-        new ActionRowBuilder().addComponents(platformInput)
+      new ActionRowBuilder().addComponents(descriptionInput),
+      new ActionRowBuilder().addComponents(platformInput)
     );
 
     await interaction.showModal(modal);
@@ -121,7 +120,8 @@ Reply ONLY with valid JSON in this exact format:
   "subcategory": "UI/Visual" or "AI" or "Gameplay" or null,
   "priority": 1 or 2 or 3 or 4,
   "cleanTitle": "short clear title under 80 characters",
-  "summary": "Clean markdown description. Include: What happened, possible steps to reproduce if you can guess them, and platform."
+  "summary": "Clean markdown description. Include: What happened, possible steps to reproduce if you can guess them, and platform.",
+  "searchKeywords": "3 to 6 important keywords from the report for searching duplicates"
 }
 
 Rules:
@@ -166,11 +166,68 @@ Reporter: ${reporter}
         subcategory: 'Gameplay',
         priority: 3,
         cleanTitle: description.slice(0, 70),
-        summary: `**Reporter:** ${reporter}\n\n**Description:**\n${description}\n\n**Platform:** ${platform}`
+        summary: `**Reporter:** ${reporter}\n\n**Description:**\n${description}\n\n**Platform:** ${platform}`,
+        searchKeywords: description.split(' ').slice(0, 5).join(' ')
       };
     }
 
-    // ===== CREATE ISSUE IN LINEAR =====
+    // ===== SEARCH FOR DUPLICATES =====
+    let existingIssue = null;
+
+    try {
+      const searchQuery = `
+        query {
+          issues(
+            filter: {
+              team: { id: { eq: "${process.env.LINEAR_TEAM_ID}" } }
+              state: { type: { nin: ["completed", "canceled"] } }
+            }
+            first: 50
+          ) {
+            nodes {
+              id
+              title
+              description
+              url
+            }
+          }
+        }
+      `;
+
+      const searchRes = await fetch('https://api.linear.app/graphql', {
+        method: 'POST',
+        headers: {
+          'Authorization': process.env.LINEAR_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query: searchQuery })
+      });
+
+      const searchData = await searchRes.json();
+      const openIssues = searchData.data?.issues?.nodes || [];
+
+      // Simple similarity check
+      const titleLower = analysis.cleanTitle.toLowerCase();
+      const keywords = (analysis.searchKeywords || '').toLowerCase().split(' ');
+
+      for (const issue of openIssues) {
+        const issueTitle = issue.title.toLowerCase();
+        const issueDesc = (issue.description || '').toLowerCase();
+
+        // Check if title is very similar or many keywords match
+        const titleMatch = issueTitle.includes(titleLower.slice(0, 25)) || titleLower.includes(issueTitle.slice(0, 25));
+        const keywordMatches = keywords.filter(k => k.length > 3 && (issueTitle.includes(k) || issueDesc.includes(k))).length;
+
+        if (titleMatch || keywordMatches >= 3) {
+          existingIssue = issue;
+          break;
+        }
+      }
+    } catch (err) {
+      console.error('Duplicate search error:', err);
+    }
+
+    // ===== CREATE OR UPDATE ISSUE =====
     try {
       const labelMap = {
         'AI': '350d1237-1fd2-4cdf-8261-99bc677536ea',
@@ -190,47 +247,93 @@ Reporter: ${reporter}
         }
       }
 
-      const mutation = `
-        mutation IssueCreate($input: IssueCreateInput!) {
-          issueCreate(input: $input) {
-            success
-            issue {
-              id
-              title
-              url
+      let issueId;
+      let isUpdate = false;
+
+      if (existingIssue) {
+        // ===== UPDATE EXISTING ISSUE =====
+        isUpdate = true;
+        issueId = existingIssue.id;
+
+        const updatedDescription = `${existingIssue.description || ''}
+
+---
+**Additional report by ${reporter}:**
+${analysis.summary}
+`;
+
+        const updateMutation = `
+          mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) {
+              success
             }
           }
-        }
-      `;
+        `;
 
-      const variables = {
-        input: {
-          teamId: process.env.LINEAR_TEAM_ID,
-          title: analysis.cleanTitle,
-          description: analysis.summary,
-          priority: analysis.priority,
-          labelIds: labelIds
-        }
-      };
+        const updateRes = await fetch('https://api.linear.app/graphql', {
+          method: 'POST',
+          headers: {
+            'Authorization': process.env.LINEAR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: updateMutation,
+            variables: {
+              id: issueId,
+              input: {
+                description: updatedDescription,
+                // Optionally raise priority if the new report is more severe
+                priority: Math.min(analysis.priority, 2)
+              }
+            }
+          })
+        });
 
-      const linearRes = await fetch('https://api.linear.app/graphql', {
-        method: 'POST',
-        headers: {
-          'Authorization': process.env.LINEAR_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ query: mutation, variables })
-      });
+        const updateData = await updateRes.json();
+        if (updateData.errors) throw new Error(JSON.stringify(updateData.errors));
 
-      const linearData = await linearRes.json();
+      } else {
+        // ===== CREATE NEW ISSUE =====
+        const createMutation = `
+          mutation IssueCreate($input: IssueCreateInput!) {
+            issueCreate(input: $input) {
+              success
+              issue {
+                id
+                title
+                url
+              }
+            }
+          }
+        `;
 
-      if (linearData.errors) {
-        throw new Error(JSON.stringify(linearData.errors));
+        const createRes = await fetch('https://api.linear.app/graphql', {
+          method: 'POST',
+          headers: {
+            'Authorization': process.env.LINEAR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: createMutation,
+            variables: {
+              input: {
+                teamId: process.env.LINEAR_TEAM_ID,
+                title: analysis.cleanTitle,
+                description: analysis.summary,
+                priority: analysis.priority,
+                labelIds: labelIds
+              }
+            }
+          })
+        });
+
+        const createData = await createRes.json();
+        if (createData.errors) throw new Error(JSON.stringify(createData.errors));
+
+        issueId = createData.data.issueCreate.issue.id;
       }
 
-      const issueId = linearData.data.issueCreate.issue.id;
-
-      // Create private thread for media
+      // ===== CREATE PRIVATE THREAD FOR MEDIA =====
       const thread = await interaction.channel.threads.create({
         name: `media-${interaction.user.username}`.slice(0, 90),
         autoArchiveDuration: 60,
@@ -239,15 +342,12 @@ Reporter: ${reporter}
         reason: 'Bug report media upload'
       });
 
-      // Add the user to the private thread
       await thread.members.add(interaction.user.id);
 
-      // Ask for media
       await thread.send({
         content: `${interaction.user} Please upload any screenshots or videos here.\nYou have **5 minutes**.`
       });
 
-      // Store for later
       pendingMedia.set(thread.id, {
         issueId: issueId,
         originalSummary: analysis.summary,
@@ -257,10 +357,12 @@ Reporter: ${reporter}
         }, 5 * 60 * 1000)
       });
 
-      // Thank the user
-      await interaction.editReply({
-        content: '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.'
-      });
+      // Final reply to user
+      const replyText = isUpdate
+        ? '✅ Thanks! This looks like a known issue — your extra info has been added to the existing report.'
+        : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.';
+
+      await interaction.editReply({ content: replyText });
 
     } catch (err) {
       console.error('Linear error:', err);
@@ -311,7 +413,7 @@ ${mediaLinks.join('\n')}`;
         query: updateMutation,
         variables: {
           id: pending.issueId,
-          input: { 
+          input: {
             description: newDescription
           }
         }
@@ -319,10 +421,7 @@ ${mediaLinks.join('\n')}`;
     });
 
     const data = await res.json();
-
-    if (data.errors) {
-      throw new Error(JSON.stringify(data.errors));
-    }
+    if (data.errors) throw new Error(JSON.stringify(data.errors));
 
     await message.reply('✅ Media successfully added to your report. Thank you!');
 
