@@ -124,7 +124,7 @@ Analyze the player's report and reply ONLY with valid JSON in this exact format:
   "type": "Crash" or "Bug",
   "priority": "a" or "b" or "c",
   "effort": 1 to 8,
-  "cleanTitle": "short clear title under 80 characters",
+  "cleanTitle": "short clear title under 80 characters, prefix all titles with the word Fix",
   "summary": "Clean markdown description for developers"
 }
 
@@ -137,7 +137,7 @@ Rules for priority:
 - "c" (Low) = Pure UI or visual issues that do not affect gameplay
 - "b" (Medium) = Everything in between
 
-Rules for effort (difficulty):
+Rules for effort to fix (difficulty):
 - 1-2 = Very simple
 - 3-4 = Moderate
 - 5-6 = Complex
