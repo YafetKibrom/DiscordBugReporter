@@ -29,7 +29,7 @@ const pendingMedia = new Map();
 
 // ========== DECK IDS ==========
 const CRASH_DECK_ID = '157be112-89b8-11f1-b0c5-132bb3e095dd';
-const BUGS_DECK_ID  = '35187e06-8b46-11f1-b0c9-c39d28479dde';
+const BUGS_DECK_ID  = '6605bb94-8613-11f1-b0b5-2be4b8796f80';
 
 // ========== FALLBACK CHANNEL ==========
 const FALLBACK_CHANNEL_ID = '1532428137806434394';
