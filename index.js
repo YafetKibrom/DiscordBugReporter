@@ -195,6 +195,13 @@ Reporter: ${reporter}
           priority: analysis.priority || 'b'
         };
 
+        // ===== DEBUG LOG =====
+        console.log('=== CODECKS PAYLOAD ===');
+        console.log(JSON.stringify(payload, null, 2));
+        console.log('CODECKS_TOKEN exists:', !!process.env.CODECKS_TOKEN);
+        console.log('CODECKS_SUBDOMAIN:', process.env.CODECKS_SUBDOMAIN);
+        console.log('=======================');
+
         const cardRes = await fetch('https://api.codecks.io/dispatch/cards/create', {
           method: 'POST',
           headers: {
