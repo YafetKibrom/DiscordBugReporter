@@ -27,6 +27,10 @@ const client = new Client({
 // Temporary storage for media uploads
 const pendingMedia = new Map();
 
+// ========== DECK IDS ==========
+const CRASH_DECK_ID = '157be112-89b8-11f1-b0c5-132bb3e095dd';
+const BUGS_DECK_ID  = '35187e06-8b46-11f1-b0c9-c39d28479dde';
+
 // ========== REGISTER SLASH COMMAND ==========
 client.once(Events.ClientReady, async () => {
   console.log(`Bot is online as ${client.user.tag}`);
@@ -110,27 +114,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ===== AI ANALYSIS =====
     const aiPrompt = `
 You are an expert game bug triage assistant.
-The player only wrote a free-form description. 
-Turn it into a clean bug report.
-
-Reply ONLY with valid JSON in this exact format:
+Analyze the player's report and reply ONLY with valid JSON in this exact format:
 
 {
   "type": "Crash" or "Bug",
-  "subcategory": "UI/Visual" or "AI" or "Gameplay" or null,
-  "priority": 1 or 2 or 3 or 4,
+  "priority": "a" or "b" or "c",
+  "effort": 1 to 8,
   "cleanTitle": "short clear title under 80 characters",
-  "summary": "Clean markdown description. Include: What happened, possible steps to reproduce if you can guess them, and platform."
+  "summary": "Clean markdown description for developers"
 }
 
-Rules:
-- type = "Crash" if the game froze, closed, or showed an error
-- Otherwise type = "Bug"
-- subcategory only when type is Bug
-- priority 1 = severe crash / softlock
-- priority 2 = important gameplay issue
-- priority 3 = normal bug
-- priority 4 = minor visual issue
+Rules for type:
+- "Crash" if the game froze, closed, softlocked, or showed an error that stops progress
+- "Bug" for everything else
+
+Rules for priority:
+- "a" (High) = Crashes or any issue that prevents the player from continuing the game
+- "c" (Low) = Pure UI or visual issues that do not affect gameplay
+- "b" (Medium) = Everything in between
+
+Rules for effort (difficulty):
+- 1-2 = Very simple (typo, small visual, easy fix)
+- 3-4 = Moderate
+- 5-6 = Complex
+- 7-8 = Very difficult / deep systems
 
 Player report:
 "${description}"
@@ -162,206 +169,43 @@ Reporter: ${reporter}
       console.error('AI error:', err);
       analysis = {
         type: 'Bug',
-        subcategory: 'Gameplay',
-        priority: 3,
+        priority: 'b',
+        effort: 4,
         cleanTitle: description.slice(0, 70),
         summary: `**Reporter:** ${reporter}\n\n**Description:**\n${description}\n\n**Platform:** ${platform}`
       };
     }
 
-    // ===== SMART DUPLICATE CHECK WITH AI =====
-    let existingIssue = null;
-
+    // ===== CREATE CARD IN CODECKS =====
     try {
-      const searchQuery = `
-        query {
-          issues(
-            filter: {
-              team: { id: { eq: "${process.env.LINEAR_TEAM_ID}" } }
-              state: { type: { nin: ["completed", "canceled"] } }
-            }
-            first: 40
-          ) {
-            nodes {
-              id
-              title
-              description
-            }
-          }
-        }
-      `;
+      const deckId = analysis.type === 'Crash' ? CRASH_DECK_ID : BUGS_DECK_ID;
 
-      const searchRes = await fetch('https://api.linear.app/graphql', {
+      const cardRes = await fetch('https://api.codecks.io/dispatch/cards/create', {
         method: 'POST',
         headers: {
-          'Authorization': process.env.LINEAR_API_KEY,
+          'X-Auth-Token': process.env.CODECKS_TOKEN,
+          'X-Account': process.env.CODECKS_SUBDOMAIN,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ query: searchQuery })
+        body: JSON.stringify({
+          content: `**${analysis.cleanTitle}**\n\n${analysis.summary}`,
+          deckId: deckId,
+          priority: analysis.priority,
+          effort: analysis.effort,
+          assigneeId: null,
+          milestoneId: null,
+          masterTags: [],
+          attachments: []
+        })
       });
 
-      const searchData = await searchRes.json();
-      const openIssues = searchData.data?.issues?.nodes || [];
-
-      if (openIssues.length > 0) {
-        const issuesList = openIssues.map((issue, i) =>
-            `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 300)}`
-        ).join('\n\n');
-
-        const duplicatePrompt = `
-You are a bug triage expert.
-
-Here is a NEW bug report:
-Title: ${analysis.cleanTitle}
-Summary: ${analysis.summary}
-
-Here are the currently open issues:
-${issuesList}
-
-Question: Does the NEW report describe the same underlying bug as any of the open issues above?
-
-Rules:
-- Focus on the core problem, not exact wording.
-- Extra details (location, timing, specific circumstances) do NOT make it a different bug.
-- Only match if you are reasonably confident they are the same issue.
-
-Reply with ONLY valid JSON in this exact format:
-{
-  "isDuplicate": true or false,
-  "matchingIssueId": "the ID of the matching issue or null",
-  "reason": "short explanation"
-}
-`;
-
-        const dupRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile',
-            messages: [{ role: 'user', content: duplicatePrompt }],
-            temperature: 0.1
-          })
-        });
-
-        const dupData = await dupRes.json();
-        const dupRaw = dupData.choices[0].message.content;
-        const dupJson = JSON.parse(dupRaw.match(/\{[\s\S]*\}/)[0]);
-
-        if (dupJson.isDuplicate && dupJson.matchingIssueId) {
-          existingIssue = openIssues.find(i => i.id === dupJson.matchingIssueId);
-          console.log(`AI detected duplicate → ${dupJson.reason}`);
-        }
-      }
-    } catch (err) {
-      console.error('Smart duplicate check error:', err);
-    }
-
-    // ===== CREATE OR UPDATE ISSUE =====
-    try {
-      const labelMap = {
-        'AI': '350d1237-1fd2-4cdf-8261-99bc677536ea',
-        'Bug': '853c01a9-78a2-44f8-a676-e21d8a6ab11b',
-        'Crash': '5ff9619b-e2ff-497e-9e3d-c4b194f1d29a',
-        'Gameplay': '28dc65d1-2ada-4388-9a62-ce53ba7c6968',
-        'UI/Visual': '1b410362-2d0d-4015-b72a-c5e7e7143ac5'
-      };
-
-      const labelIds = [];
-      if (analysis.type === 'Crash') {
-        labelIds.push(labelMap['Crash']);
-      } else {
-        labelIds.push(labelMap['Bug']);
-        if (analysis.subcategory && labelMap[analysis.subcategory]) {
-          labelIds.push(labelMap[analysis.subcategory]);
-        }
+      if (!cardRes.ok) {
+        const errText = await cardRes.text();
+        throw new Error(errText);
       }
 
-      let issueId;
-      let isUpdate = false;
-
-      if (existingIssue) {
-        // Update existing issue
-        isUpdate = true;
-        issueId = existingIssue.id;
-
-        const updatedDescription = `${existingIssue.description || ''}
-
----
-**Additional report by ${reporter}:**
-${analysis.summary}
-`;
-
-        const updateMutation = `
-          mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
-            issueUpdate(id: $id, input: $input) {
-              success
-            }
-          }
-        `;
-
-        const updateRes = await fetch('https://api.linear.app/graphql', {
-          method: 'POST',
-          headers: {
-            'Authorization': process.env.LINEAR_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            query: updateMutation,
-            variables: {
-              id: issueId,
-              input: {
-                description: updatedDescription
-              }
-            }
-          })
-        });
-
-        const updateData = await updateRes.json();
-        if (updateData.errors) throw new Error(JSON.stringify(updateData.errors));
-
-      } else {
-        // Create new issue
-        const createMutation = `
-          mutation IssueCreate($input: IssueCreateInput!) {
-            issueCreate(input: $input) {
-              success
-              issue {
-                id
-                title
-                url
-              }
-            }
-          }
-        `;
-
-        const createRes = await fetch('https://api.linear.app/graphql', {
-          method: 'POST',
-          headers: {
-            'Authorization': process.env.LINEAR_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            query: createMutation,
-            variables: {
-              input: {
-                teamId: process.env.LINEAR_TEAM_ID,
-                title: analysis.cleanTitle,
-                description: analysis.summary,
-                priority: analysis.priority,
-                labelIds: labelIds
-              }
-            }
-          })
-        });
-
-        const createData = await createRes.json();
-        if (createData.errors) throw new Error(JSON.stringify(createData.errors));
-
-        issueId = createData.data.issueCreate.issue.id;
-      }
+      const cardData = await cardRes.json();
+      const cardId = cardData.id || cardData.cardId || null;
 
       // ===== CREATE PRIVATE THREAD FOR MEDIA =====
       const thread = await interaction.channel.threads.create({
@@ -379,7 +223,7 @@ ${analysis.summary}
       });
 
       pendingMedia.set(thread.id, {
-        issueId: issueId,
+        cardId: cardId,
         originalSummary: analysis.summary,
         timeout: setTimeout(() => {
           pendingMedia.delete(thread.id);
@@ -387,14 +231,12 @@ ${analysis.summary}
         }, 5 * 60 * 1000)
       });
 
-      const replyText = isUpdate
-          ? '✅ Thanks! This looks related to an existing report — your extra info has been added.'
-          : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.';
-
-      await interaction.editReply({ content: replyText });
+      await interaction.editReply({
+        content: '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread I just created.'
+      });
 
     } catch (err) {
-      console.error('Linear error:', err);
+      console.error('Codecks error:', err);
       await interaction.editReply({
         content: '⚠️ Something went wrong while saving your report. Please try again later.'
       });
@@ -418,72 +260,19 @@ client.on(Events.MessageCreate, async (message) => {
   });
 
   try {
-    // 1. First get the current description from Linear
-    const getQuery = `
-      query {
-        issue(id: "${pending.issueId}") {
-          description
-        }
-      }
-    `;
+    // For now we just thank the user.
+    // (Updating an existing Codecks card with new content is more complex,
+    // so we keep media links visible in the thread for you to check)
 
-    const getRes = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Authorization': process.env.LINEAR_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ query: getQuery })
-    });
-
-    const getData = await getRes.json();
-    const currentDescription = getData.data?.issue?.description || '';
-
-    // 2. Only append the media links (never overwrite)
-    const newDescription = `${currentDescription}
-
----
-**Media:**
-${mediaLinks.join('\n')}`;
-
-    // 3. Update the issue
-    const updateMutation = `
-      mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
-        issueUpdate(id: $id, input: $input) {
-          success
-        }
-      }
-    `;
-
-    const updateRes = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Authorization': process.env.LINEAR_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query: updateMutation,
-        variables: {
-          id: pending.issueId,
-          input: {
-            description: newDescription
-          }
-        }
-      })
-    });
-
-    const updateData = await updateRes.json();
-    if (updateData.errors) throw new Error(JSON.stringify(updateData.errors));
-
-    await message.reply('✅ Media added to the report. Thank you!');
+    await message.reply('✅ Media received! Thank you, the team will see it.');
 
     clearTimeout(pending.timeout);
     pendingMedia.delete(message.channel.id);
     await message.channel.setArchived(true);
 
   } catch (err) {
-    console.error('Failed to update Linear with media:', err);
-    await message.reply('⚠️ Sorry, I could not attach the media to the report.');
+    console.error('Media handling error:', err);
+    await message.reply('⚠️ Something went wrong while processing the media.');
   }
 });
 
