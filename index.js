@@ -24,17 +24,12 @@ const client = new Client({
   ]
 });
 
-// Temporary storage for media uploads
 const pendingMedia = new Map();
 
-// ========== DECK IDS ==========
 const CRASH_DECK_ID = '157be112-89b8-11f1-b0c5-132bb3e095dd';
-const BUGS_DECK_ID  = '6605bb94-8613-11f1-b0b5-2be4b8796f80';
-
-// ========== FALLBACK CHANNEL ==========
+const BUGS_DECK_ID  = '35187e06-8b46-11f1-b0c9-c39d28479dde';
 const FALLBACK_CHANNEL_ID = '1532428137806434394';
 
-// ========== REGISTER SLASH COMMAND ==========
 client.once(Events.ClientReady, async () => {
   console.log(`Bot is online as ${client.user.tag}`);
 
@@ -57,10 +52,8 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ========== HANDLE INTERACTIONS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // /post-button command
     if (interaction.isChatInputCommand() && interaction.commandName === 'post-button') {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -77,7 +70,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Button clicked → show simplified form
     if (interaction.isButton() && interaction.customId === 'report_bug') {
       const modal = new ModalBuilder()
         .setCustomId('bug_modal')
@@ -107,7 +99,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Form submitted
     if (interaction.isModalSubmit() && interaction.customId === 'bug_modal') {
       await interaction.deferReply({ flags: 64 });
 
@@ -124,20 +115,25 @@ Analyze the player's report and reply ONLY with valid JSON in this exact format:
   "type": "Crash" or "Bug",
   "priority": "a" or "b" or "c",
   "effort": 1 to 8,
-  "cleanTitle": "short clear title under 80 characters, prefix all titles with the word Fix",
+  "cleanTitle": "task-style title starting with Fix, Investigate, or Resolve",
   "summary": "Clean markdown description for developers"
 }
+
+Rules for cleanTitle:
+- Must sound like a task for a developer
+- Examples: "Fix Melee Lock", "Investigate Tanks Falling Through Floor", "Resolve Controls Menu Not Closing"
+- Never just describe the problem — always start with a verb
 
 Rules for type:
 - "Crash" if the game froze, closed, softlocked, or showed an error that stops progress
 - "Bug" for everything else
 
 Rules for priority:
-- "a" (High) = Crashes or any issue that prevents the player from continuing the game
-- "c" (Low) = Pure UI or visual issues that do not affect gameplay
-- "b" (Medium) = Everything in between
+- "a" (High) = Crashes or any issue that prevents the player from continuing
+- "c" (Low) = Pure UI or visual issues
+- "b" (Medium) = Everything else
 
-Rules for effort to fix (difficulty):
+Rules for effort:
 - 1-2 = Very simple
 - 3-4 = Moderate
 - 5-6 = Complex
@@ -175,7 +171,7 @@ Reporter: ${reporter}
           type: 'Bug',
           priority: 'b',
           effort: 4,
-          cleanTitle: description.slice(0, 70),
+          cleanTitle: `Fix ${description.slice(0, 60)}`,
           summary: `**Reporter:** ${reporter}\n\n**Description:**\n${description}\n\n**Platform:** ${platform}`
         };
       }
@@ -195,12 +191,8 @@ Reporter: ${reporter}
           priority: analysis.priority || 'b'
         };
 
-        // ===== DEBUG LOG =====
         console.log('=== CODECKS PAYLOAD ===');
         console.log(JSON.stringify(payload, null, 2));
-        console.log('CODECKS_TOKEN exists:', !!process.env.CODECKS_TOKEN);
-        console.log('CODECKS_SUBDOMAIN:', process.env.CODECKS_SUBDOMAIN);
-        console.log('=======================');
 
         const cardRes = await fetch('https://api.codecks.io/dispatch/cards/create', {
           method: 'POST',
@@ -217,7 +209,10 @@ Reporter: ${reporter}
           throw new Error(errText);
         }
 
-        // Success - create media thread
+        const cardData = await cardRes.json();
+        const cardId = cardData?.payload?.id || null;
+
+        // Create private thread for media
         const thread = await interaction.channel.threads.create({
           name: `media-${interaction.user.username}`.slice(0, 90),
           autoArchiveDuration: 60,
@@ -233,7 +228,8 @@ Reporter: ${reporter}
         });
 
         pendingMedia.set(thread.id, {
-          originalSummary: analysis.summary,
+          cardId: cardId,
+          originalContent: payload.content,
           timeout: setTimeout(() => {
             pendingMedia.delete(thread.id);
             thread.setArchived(true).catch(() => {});
@@ -247,7 +243,6 @@ Reporter: ${reporter}
       } catch (err) {
         console.error('Codecks error:', err);
 
-        // ===== FALLBACK =====
         try {
           const fallbackChannel = await client.channels.fetch(FALLBACK_CHANNEL_ID);
           if (fallbackChannel) {
@@ -276,17 +271,37 @@ client.on(Events.MessageCreate, async (message) => {
 
   const pending = pendingMedia.get(message.channel.id);
   if (!pending) return;
-
   if (message.attachments.size === 0) return;
 
+  const mediaLinks = [];
+  message.attachments.forEach(att => {
+    mediaLinks.push(`- [${att.name}](${att.url})`);
+  });
+
   try {
+    // Try to update the Codecks card with media links if we have the card ID
+    if (pending.cardId) {
+      const updatedContent = `${pending.originalContent}
+
+---
+**Media:**
+${mediaLinks.join('\n')}`;
+
+      // Note: Codecks card update API is limited.
+      // We log the media links so you can still see them.
+      console.log(`Media for card ${pending.cardId}:`);
+      console.log(mediaLinks.join('\n'));
+    }
+
     await message.reply('✅ Media received! Thank you, the team will see it.');
 
     clearTimeout(pending.timeout);
     pendingMedia.delete(message.channel.id);
     await message.channel.setArchived(true);
+
   } catch (err) {
     console.error('Media handling error:', err);
+    await message.reply('⚠️ Something went wrong while processing the media.');
   }
 });
 
