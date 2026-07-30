@@ -40,16 +40,16 @@ client.once(Events.ClientReady, async () => {
 
   const commands = [
     new SlashCommandBuilder()
-        .setName('post-button')
-        .setDescription('Post the bug report button in this channel')
+      .setName('post-button')
+      .setDescription('Post the bug report button in this channel')
   ].map(command => command.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
   try {
     await rest.put(
-        Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
-        { body: commands }
+      Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
+      { body: commands }
     );
     console.log('Slash command /post-button registered');
   } catch (error) {
@@ -63,11 +63,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // /post-button command
     if (interaction.isChatInputCommand() && interaction.commandName === 'post-button') {
       const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-              .setCustomId('report_bug')
-              .setLabel('Report a Bug / Crash')
-              .setStyle(ButtonStyle.Danger)
-              .setEmoji('🐛')
+        new ButtonBuilder()
+          .setCustomId('report_bug')
+          .setLabel('Report a Bug / Crash')
+          .setStyle(ButtonStyle.Danger)
+          .setEmoji('🐛')
       );
 
       await interaction.reply({
@@ -80,27 +80,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Button clicked → show simplified form
     if (interaction.isButton() && interaction.customId === 'report_bug') {
       const modal = new ModalBuilder()
-          .setCustomId('bug_modal')
-          .setTitle('Report a Bug / Crash');
+        .setCustomId('bug_modal')
+        .setTitle('Report a Bug / Crash');
 
       const descriptionInput = new TextInputBuilder()
-          .setCustomId('description')
-          .setLabel('What happened?')
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(true)
-          .setPlaceholder('Describe the bug or crash in your own words...')
-          .setMaxLength(1800);
+        .setCustomId('description')
+        .setLabel('What happened?')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setPlaceholder('Describe the bug or crash in your own words...')
+        .setMaxLength(1800);
 
       const platformInput = new TextInputBuilder()
-          .setCustomId('platform')
-          .setLabel('Platform / Version (optional)')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setPlaceholder('e.g. Steam, Windows, v1.0.3');
+        .setCustomId('platform')
+        .setLabel('Platform / Version (optional)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setPlaceholder('e.g. Steam, Windows, v1.0.3');
 
       modal.addComponents(
-          new ActionRowBuilder().addComponents(descriptionInput),
-          new ActionRowBuilder().addComponents(platformInput)
+        new ActionRowBuilder().addComponents(descriptionInput),
+        new ActionRowBuilder().addComponents(platformInput)
       );
 
       await interaction.showModal(modal);
@@ -181,7 +181,6 @@ Reporter: ${reporter}
       }
 
       // ===== CREATE CARD IN CODECKS =====
-// ===== CREATE CARD IN CODECKS =====
       try {
         const deckId = analysis.type === 'Crash' ? CRASH_DECK_ID : BUGS_DECK_ID;
 
@@ -240,23 +239,6 @@ Reporter: ${reporter}
 
       } catch (err) {
         console.error('Codecks error:', err);
-
-        // Fallback
-        try {
-          const fallbackChannel = await client.channels.fetch(FALLBACK_CHANNEL_ID);
-          if (fallbackChannel) {
-            await fallbackChannel.send({
-              content: `🚨 **Failed to create Codecks card**\n\n**Reporter:** ${reporter}\n**Platform:** ${platform}\n**Type:** ${analysis?.type || 'Unknown'}\n**Priority:** ${analysis?.priority || 'Unknown'}\n\n**Original Report:**\n${description}\n\n**AI Summary:**\n${analysis?.summary || 'N/A'}\n\n**Error:**\n\`\`\`${err.message || err}\`\`\``
-            });
-          }
-        } catch (fallbackErr) {
-          console.error('Failed to send fallback message:', fallbackErr);
-        }
-
-        await interaction.editReply({
-          content: '✅ Thanks! We received your report. The team will look into it.'
-        });
-      }
 
         // ===== FALLBACK =====
         try {
