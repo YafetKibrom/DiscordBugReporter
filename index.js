@@ -11,8 +11,7 @@ const {
   Events,
   REST,
   Routes,
-  SlashCommandBuilder,
-  PermissionFlagsBits
+  SlashCommandBuilder
 } = require('discord.js');
 
 const client = new Client({
@@ -24,7 +23,7 @@ const client = new Client({
   ]
 });
 
-// pendingMedia: userId → { linearIssueId, timeout }
+// userId → { linearIssueId, timeout }
 const pendingMedia = new Map();
 
 // ========== IDS ==========
@@ -197,7 +196,7 @@ Reporter: ${reporter}
                 team: { id: { eq: "${process.env.LINEAR_TEAM_ID}" } }
                 state: { type: { nin: ["completed", "canceled"] } }
               }
-              first: 40
+              first: 50
             ) {
               nodes { id title description url }
             }
@@ -218,7 +217,7 @@ Reporter: ${reporter}
 
         if (openIssues.length > 0) {
           const issuesList = openIssues.map((issue, i) =>
-            `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 250)}`
+            `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 300)}`
           ).join('\n\n');
 
           const duplicatePrompt = `
@@ -232,7 +231,7 @@ Open issues:
 ${issuesList}
 
 Does the NEW report describe the same underlying bug as any existing issue?
-Focus on the core problem, not exact wording.
+Focus on the core problem, not exact wording. Extra details do not make it a different bug.
 
 Reply ONLY with JSON:
 {
@@ -268,7 +267,7 @@ Reply ONLY with JSON:
         console.error('Duplicate check error:', err);
       }
 
-      // ===== CREATE / UPDATE LINEAR =====
+      // ===== CREATE OR UPDATE LINEAR =====
       let linearIssueId = null;
       let linearIssueUrl = null;
       let isUpdate = false;
@@ -285,18 +284,35 @@ Reply ONLY with JSON:
         }
 
         if (existingLinearIssue) {
+          // ===== UPDATE EXISTING ISSUE =====
           isUpdate = true;
           linearIssueId = existingLinearIssue.id;
           linearIssueUrl = existingLinearIssue.url;
 
-          const updatedDescription = `${existingLinearIssue.description || ''}
+          // Fetch the latest description first (more reliable)
+          const getRes = await fetch('https://api.linear.app/graphql', {
+            method: 'POST',
+            headers: {
+              'Authorization': process.env.LINEAR_API_KEY,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              query: `query { issue(id: "${linearIssueId}") { description } }`
+            })
+          });
+
+          const getData = await getRes.json();
+          const currentDesc = getData.data?.issue?.description || existingLinearIssue.description || '';
+
+          const updatedDescription = `${currentDesc}
 
 ---
 **Additional report by ${reporter}:**
 ${analysis.summary}
+**Platform:** ${platform}
 `;
 
-          await fetch('https://api.linear.app/graphql', {
+          const updateRes = await fetch('https://api.linear.app/graphql', {
             method: 'POST',
             headers: {
               'Authorization': process.env.LINEAR_API_KEY,
@@ -315,7 +331,15 @@ ${analysis.summary}
             })
           });
 
+          const updateData = await updateRes.json();
+          if (updateData.errors) {
+            console.error('Linear update failed:', JSON.stringify(updateData.errors));
+          } else {
+            console.log('Successfully appended additional context to existing Linear issue');
+          }
+
         } else {
+          // ===== CREATE NEW ISSUE =====
           const createRes = await fetch('https://api.linear.app/graphql', {
             method: 'POST',
             headers: {
@@ -350,8 +374,8 @@ ${analysis.summary}
           linearIssueUrl = createData.data.issueCreate.issue.url;
         }
 
-        // ===== CREATE CODECKS CARD (new issues only) =====
-        if (!isUpdate) {
+        // ===== CREATE CODECKS CARD (only for brand new issues) =====
+        if (!isUpdate && linearIssueUrl) {
           const deckId = analysis.type === 'Crash' ? CRASH_DECK_ID : BUGS_DECK_ID;
 
           const codecksContent = `**${analysis.cleanTitle}**
@@ -386,7 +410,7 @@ ${analysis.summary}
           }
         }
 
-        // ===== GIVE TEMPORARY UPLOAD PERMISSION =====
+        // ===== GIVE TEMPORARY UPLOAD PERMISSION + STORE PENDING =====
         try {
           const reportingChannel = await client.channels.fetch(REPORTING_CHANNEL_ID);
 
@@ -396,21 +420,21 @@ ${analysis.summary}
             ViewChannel: true
           });
 
-          // Store pending
           if (pendingMedia.has(reporterId)) {
             clearTimeout(pendingMedia.get(reporterId).timeout);
           }
 
           pendingMedia.set(reporterId, {
-            linearIssueId,
+            linearIssueId: linearIssueId,
             timeout: setTimeout(async () => {
               try {
                 await reportingChannel.permissionOverwrites.delete(reporterId);
               } catch (e) {}
               pendingMedia.delete(reporterId);
-            }, 10 * 60 * 1000) // 10 minutes
+            }, 10 * 60 * 1000)
           });
 
+          console.log(`Pending media set for user ${reporterId} → Linear issue ${linearIssueId}`);
         } catch (permErr) {
           console.error('Failed to set temporary permissions:', permErr);
         }
@@ -452,10 +476,15 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.attachments.size === 0) return;
 
   const pending = pendingMedia.get(message.author.id);
-  if (!pending || !pending.linearIssueId) return;
+  if (!pending || !pending.linearIssueId) {
+    console.log('No pending media entry for user', message.author.id);
+    return;
+  }
+
+  console.log(`Processing media from ${message.author.tag} for Linear issue ${pending.linearIssueId}`);
 
   try {
-    // 1. Download and re-upload files to permanent channel
+    // 1. Re-upload files to permanent channel
     const mediaChannel = await client.channels.fetch(MEDIA_CHANNEL_ID);
     const filesToUpload = [];
 
@@ -469,17 +498,17 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     const permanentMessage = await mediaChannel.send({
-      content: `**Media from report** (Linear ID: \`${pending.linearIssueId}\`)\nUploaded by <@${message.author.id}>`,
+      content: `**Media from report**\nLinear ID: \`${pending.linearIssueId}\`\nUploaded by: <@${message.author.id}>`,
       files: filesToUpload
     });
 
-    // 2. Build permanent links
+    // 2. Collect new permanent links
     const mediaLinks = [];
     permanentMessage.attachments.forEach(att => {
       mediaLinks.push(`- [${att.name}](${att.url})`);
     });
 
-    // 3. Update Linear issue with permanent links
+    // 3. Append media to Linear issue (works for both new and existing issues)
     const getRes = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
       headers: {
@@ -500,7 +529,7 @@ client.on(Events.MessageCreate, async (message) => {
 **Media:**
 ${mediaLinks.join('\n')}`;
 
-    await fetch('https://api.linear.app/graphql', {
+    const updateRes = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
       headers: {
         'Authorization': process.env.LINEAR_API_KEY,
@@ -519,6 +548,13 @@ ${mediaLinks.join('\n')}`;
       })
     });
 
+    const updateData = await updateRes.json();
+    if (updateData.errors) {
+      console.error('Failed to add media to Linear:', JSON.stringify(updateData.errors));
+    } else {
+      console.log('Media successfully added to Linear issue');
+    }
+
     // 4. Delete original message
     await message.delete().catch(() => {});
 
@@ -531,7 +567,6 @@ ${mediaLinks.join('\n')}`;
     clearTimeout(pending.timeout);
     pendingMedia.delete(message.author.id);
 
-    // Optional confirmation in permanent channel
     await permanentMessage.reply('✅ Media saved and added to the Linear issue.');
 
   } catch (err) {
