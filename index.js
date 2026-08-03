@@ -12,7 +12,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  ChannelType
+  PermissionFlagsBits
 } = require('discord.js');
 
 const client = new Client({
@@ -24,16 +24,17 @@ const client = new Client({
   ]
 });
 
+// pendingMedia: userId → { linearIssueId, timeout }
 const pendingMedia = new Map();
 
-// ========== CODECKS DECKS ==========
+// ========== IDS ==========
 const CRASH_DECK_ID = '157be112-89b8-11f1-b0c5-132bb3e095dd';
 const BUGS_DECK_ID  = '6605bb94-8613-11f1-b0b5-2be4b8796f80';
 
-// ========== FALLBACK CHANNEL ==========
-const FALLBACK_CHANNEL_ID = '1532428137806434394';
+const FALLBACK_CHANNEL_ID  = '1532428137806434394';
+const MEDIA_CHANNEL_ID     = '1533885254241222748';
+const REPORTING_CHANNEL_ID = '1531928004333404181';
 
-// ========== LINEAR LABELS ==========
 const LINEAR_LABELS = {
   'AI': '350d1237-1fd2-4cdf-8261-99bc677536ea',
   'Bug': '853c01a9-78a2-44f8-a676-e21d8a6ab11b',
@@ -49,7 +50,7 @@ client.once(Events.ClientReady, async () => {
     new SlashCommandBuilder()
       .setName('post-button')
       .setDescription('Post the bug report button in this channel')
-  ].map(command => command.toJSON());
+  ].map(c => c.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
@@ -120,6 +121,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const description = interaction.fields.getTextInputValue('description');
       const platform = interaction.fields.getTextInputValue('platform') || 'Not specified';
       const reporter = interaction.user.tag;
+      const reporterId = interaction.user.id;
 
       // ===== AI ANALYSIS =====
       const aiPrompt = `
@@ -135,7 +137,7 @@ Analyze the player's report and reply ONLY with valid JSON:
 }
 
 Rules for cleanTitle:
-- Must sound like a task (e.g. "Fix Melee Lock")
+- Must sound like a task (e.g. "Fix Melee Lock", "Investigate Tanks Falling Through Floor")
 
 Rules for type:
 - "Crash" if the game froze, closed, softlocked, or stops progress
@@ -184,7 +186,7 @@ Reporter: ${reporter}
         };
       }
 
-      // ===== LINEAR: SEARCH FOR DUPLICATES =====
+      // ===== LINEAR DUPLICATE CHECK =====
       let existingLinearIssue = null;
 
       try {
@@ -197,12 +199,7 @@ Reporter: ${reporter}
               }
               first: 40
             ) {
-              nodes {
-                id
-                title
-                description
-                url
-              }
+              nodes { id title description url }
             }
           }
         `;
@@ -271,7 +268,7 @@ Reply ONLY with JSON:
         console.error('Duplicate check error:', err);
       }
 
-      // ===== CREATE OR UPDATE LINEAR ISSUE =====
+      // ===== CREATE / UPDATE LINEAR =====
       let linearIssueId = null;
       let linearIssueUrl = null;
       let isUpdate = false;
@@ -288,7 +285,6 @@ Reply ONLY with JSON:
         }
 
         if (existingLinearIssue) {
-          // Update existing Linear issue
           isUpdate = true;
           linearIssueId = existingLinearIssue.id;
           linearIssueUrl = existingLinearIssue.url;
@@ -320,7 +316,6 @@ ${analysis.summary}
           });
 
         } else {
-          // Create new Linear issue
           const createRes = await fetch('https://api.linear.app/graphql', {
             method: 'POST',
             headers: {
@@ -355,7 +350,7 @@ ${analysis.summary}
           linearIssueUrl = createData.data.issueCreate.issue.url;
         }
 
-        // ===== CREATE CODECKS CARD (only for new issues) =====
+        // ===== CREATE CODECKS CARD (new issues only) =====
         if (!isUpdate) {
           const deckId = analysis.type === 'Crash' ? CRASH_DECK_ID : BUGS_DECK_ID;
 
@@ -387,41 +382,48 @@ ${analysis.summary}
           });
 
           if (!codecksRes.ok) {
-            const errText = await codecksRes.text();
-            console.error('Codecks create failed:', errText);
+            console.error('Codecks create failed:', await codecksRes.text());
           }
         }
 
-        // ===== MEDIA THREAD =====
-        const thread = await interaction.channel.threads.create({
-          name: `media-${interaction.user.username}`.slice(0, 90),
-          autoArchiveDuration: 60,
-          type: ChannelType.PrivateThread,
-          invitable: false,
-          reason: 'Bug report media upload'
-        });
+        // ===== GIVE TEMPORARY UPLOAD PERMISSION =====
+        try {
+          const reportingChannel = await client.channels.fetch(REPORTING_CHANNEL_ID);
 
-        await thread.members.add(interaction.user.id);
-        await thread.send(`${interaction.user} Please upload any screenshots or videos here.\nYou have **5 minutes**.`);
+          await reportingChannel.permissionOverwrites.edit(reporterId, {
+            SendMessages: true,
+            AttachFiles: true,
+            ViewChannel: true
+          });
 
-        pendingMedia.set(thread.id, {
-          linearIssueId: linearIssueId,
-          timeout: setTimeout(() => {
-            pendingMedia.delete(thread.id);
-            thread.setArchived(true).catch(() => {});
-          }, 5 * 60 * 1000)
-        });
+          // Store pending
+          if (pendingMedia.has(reporterId)) {
+            clearTimeout(pendingMedia.get(reporterId).timeout);
+          }
+
+          pendingMedia.set(reporterId, {
+            linearIssueId,
+            timeout: setTimeout(async () => {
+              try {
+                await reportingChannel.permissionOverwrites.delete(reporterId);
+              } catch (e) {}
+              pendingMedia.delete(reporterId);
+            }, 10 * 60 * 1000) // 10 minutes
+          });
+
+        } catch (permErr) {
+          console.error('Failed to set temporary permissions:', permErr);
+        }
 
         const replyText = isUpdate
-          ? '✅ Thanks! This looks related to an existing report — your extra info has been added.'
-          : '✅ Thanks for the report! If you have screenshots or videos, please upload them in the private thread.';
+          ? '✅ Thanks! This looks related to an existing report — your extra info has been added.\n\nYou can now upload screenshots or videos **in this channel**. They will be moved automatically.'
+          : '✅ Thanks for the report!\n\nYou can now upload screenshots or videos **in this channel**. They will be moved automatically.';
 
         await interaction.editReply({ content: replyText });
 
       } catch (err) {
         console.error('Main processing error:', err);
 
-        // Fallback
         try {
           const fallbackChannel = await client.channels.fetch(FALLBACK_CHANNEL_ID);
           if (fallbackChannel) {
@@ -443,22 +445,41 @@ ${analysis.summary}
   }
 });
 
-// ===== MEDIA UPLOAD → add to Linear =====
+// ===== MEDIA UPLOAD LISTENER =====
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
-  if (!message.channel.isThread()) return;
-
-  const pending = pendingMedia.get(message.channel.id);
-  if (!pending || !pending.linearIssueId) return;
+  if (message.channel.id !== REPORTING_CHANNEL_ID) return;
   if (message.attachments.size === 0) return;
 
-  const mediaLinks = [];
-  message.attachments.forEach(att => {
-    mediaLinks.push(`- [${att.name}](${att.url})`);
-  });
+  const pending = pendingMedia.get(message.author.id);
+  if (!pending || !pending.linearIssueId) return;
 
   try {
-    // Get current description
+    // 1. Download and re-upload files to permanent channel
+    const mediaChannel = await client.channels.fetch(MEDIA_CHANNEL_ID);
+    const filesToUpload = [];
+
+    for (const attachment of message.attachments.values()) {
+      const response = await fetch(attachment.url);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      filesToUpload.push({
+        attachment: buffer,
+        name: attachment.name
+      });
+    }
+
+    const permanentMessage = await mediaChannel.send({
+      content: `**Media from report** (Linear ID: \`${pending.linearIssueId}\`)\nUploaded by <@${message.author.id}>`,
+      files: filesToUpload
+    });
+
+    // 2. Build permanent links
+    const mediaLinks = [];
+    permanentMessage.attachments.forEach(att => {
+      mediaLinks.push(`- [${att.name}](${att.url})`);
+    });
+
+    // 3. Update Linear issue with permanent links
     const getRes = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
       headers: {
@@ -498,14 +519,24 @@ ${mediaLinks.join('\n')}`;
       })
     });
 
-    await message.reply('✅ Media added to the report. Thank you!');
+    // 4. Delete original message
+    await message.delete().catch(() => {});
+
+    // 5. Revoke temporary permission
+    try {
+      const reportingChannel = await client.channels.fetch(REPORTING_CHANNEL_ID);
+      await reportingChannel.permissionOverwrites.delete(message.author.id);
+    } catch (e) {}
+
     clearTimeout(pending.timeout);
-    pendingMedia.delete(message.channel.id);
-    await message.channel.setArchived(true);
+    pendingMedia.delete(message.author.id);
+
+    // Optional confirmation in permanent channel
+    await permanentMessage.reply('✅ Media saved and added to the Linear issue.');
 
   } catch (err) {
-    console.error('Media update error:', err);
-    await message.reply('⚠️ Could not attach the media automatically.');
+    console.error('Media handling error:', err);
+    await message.reply('⚠️ Something went wrong while processing the media.').catch(() => {});
   }
 });
 
