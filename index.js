@@ -23,7 +23,7 @@ const client = new Client({
   ]
 });
 
-// userId → { linearIssueId, timeout }
+// userId → { linearIssueId, originalDescription, cleanTitle, timeout }
 const pendingMedia = new Map();
 
 // ========== IDS ==========
@@ -433,6 +433,8 @@ ${analysis.summary}
           }
           pendingMedia.set(reporterId, {
             linearIssueId: linearIssueId,
+            originalDescription: description,
+            cleanTitle: analysis.cleanTitle,
             timeout: setTimeout(async () => {
               try {
                 const ch = await client.channels.fetch(REPORTING_CHANNEL_ID);
@@ -509,7 +511,11 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     const permanentMessage = await mediaChannel.send({
-      content: `**Media from report**\nLinear ID: \`${pending.linearIssueId}\`\nUploaded by: <@${message.author.id}>${userText ? `\n\nUser note: ${userText}` : ''}`,
+      content: `**Media from report**
+Linear ID: \`${pending.linearIssueId}\`
+Uploaded by: <@${message.author.id}>
+**Original report:** ${pending.cleanTitle || 'Bug report'}
+${pending.originalDescription || ''}${userText ? `\n\n**Note with media:** ${userText}` : ''}`,
       files: filesToUpload.map(f => ({ attachment: f.attachment, name: f.name }))
     });
 
