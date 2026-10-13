@@ -29,7 +29,6 @@ const pendingMedia = new Map();
 // ========== IDS ==========
 const CRASH_DECK_ID = '157be112-89b8-11f1-b0c5-132bb3e095dd';
 const BUGS_DECK_ID  = '6605bb94-8613-11f1-b0b5-2be4b8796f80';
-
 const FALLBACK_CHANNEL_ID  = '1532428137806434394';
 const MEDIA_CHANNEL_ID     = '1533885254241222748';
 const REPORTING_CHANNEL_ID = '1531928004333404181';
@@ -42,17 +41,69 @@ const LINEAR_LABELS = {
   'UI/Visual': '1b410362-2d0d-4015-b72a-c5e7e7143ac5'
 };
 
+// ========== LINEAR FILE UPLOAD ==========
+async function uploadFileToLinear(buffer, filename, contentType) {
+  const res = await fetch('https://api.linear.app/graphql', {
+    method: 'POST',
+    headers: {
+      'Authorization': process.env.LINEAR_API_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      query: `
+        mutation FileUpload($filename: String!, $contentType: String!, $size: Int!) {
+          fileUpload(filename: $filename, contentType: $contentType, size: $size) {
+            success
+            uploadFile {
+              uploadUrl
+              assetUrl
+              headers { key value }
+            }
+          }
+        }
+      `,
+      variables: {
+        filename,
+        contentType: contentType || 'application/octet-stream',
+        size: buffer.length
+      }
+    })
+  });
+
+  const data = await res.json();
+  if (!data.data?.fileUpload?.success || !data.data.fileUpload.uploadFile) {
+    throw new Error('Linear fileUpload failed: ' + JSON.stringify(data.errors || data));
+  }
+
+  const { uploadUrl, assetUrl, headers } = data.data.fileUpload.uploadFile;
+
+  const putHeaders = { 'Content-Type': contentType || 'application/octet-stream' };
+  for (const h of headers || []) {
+    putHeaders[h.key] = h.value;
+  }
+
+  const putRes = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: putHeaders,
+    body: buffer
+  });
+
+  if (!putRes.ok) {
+    const text = await putRes.text().catch(() => '');
+    throw new Error(`Linear PUT failed: ${putRes.status} ${text}`);
+  }
+
+  return assetUrl;
+}
+
 client.once(Events.ClientReady, async () => {
   console.log(`Bot is online as ${client.user.tag}`);
-
   const commands = [
     new SlashCommandBuilder()
       .setName('post-button')
       .setDescription('Post the bug report button in this channel')
   ].map(c => c.toJSON());
-
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-
   try {
     await rest.put(
       Routes.applicationGuildCommands(client.user.id, '1397328029356658818'),
@@ -75,7 +126,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setStyle(ButtonStyle.Danger)
           .setEmoji('🐛')
       );
-
       await interaction.reply({
         content: 'Found a bug or crash? Click the button below to report it!',
         components: [row]
@@ -88,7 +138,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const modal = new ModalBuilder()
         .setCustomId('bug_modal')
         .setTitle('Report a Bug / Crash');
-
       const descriptionInput = new TextInputBuilder()
         .setCustomId('description')
         .setLabel('What happened?')
@@ -96,19 +145,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setRequired(true)
         .setPlaceholder('Describe the bug or crash in your own words...')
         .setMaxLength(1800);
-
       const platformInput = new TextInputBuilder()
         .setCustomId('platform')
         .setLabel('Platform / Version (optional)')
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
         .setPlaceholder('e.g. Steam, Windows, v1.0.3');
-
       modal.addComponents(
         new ActionRowBuilder().addComponents(descriptionInput),
         new ActionRowBuilder().addComponents(platformInput)
       );
-
       await interaction.showModal(modal);
       return;
     }
@@ -116,7 +162,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Form submitted
     if (interaction.isModalSubmit() && interaction.customId === 'bug_modal') {
       await interaction.deferReply({ flags: 64 });
-
       const description = interaction.fields.getTextInputValue('description');
       const platform = interaction.fields.getTextInputValue('platform') || 'Not specified';
       const reporter = interaction.user.tag;
@@ -126,7 +171,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const aiPrompt = `
 You are an expert game bug triage assistant.
 Analyze the player's report and reply ONLY with valid JSON:
-
 {
   "type": "Crash" or "Bug",
   "subcategory": "UI/Visual" or "AI" or "Gameplay" or null,
@@ -134,27 +178,21 @@ Analyze the player's report and reply ONLY with valid JSON:
   "cleanTitle": "task-style title starting with Fix, Investigate, or Resolve",
   "summary": "Clean markdown description for developers"
 }
-
 Rules for cleanTitle:
 - Must sound like a task (e.g. "Fix Melee Lock", "Investigate Tanks Falling Through Floor")
-
 Rules for type:
 - "Crash" if the game froze, closed, softlocked, or stops progress
 - "Bug" otherwise
-
 Rules for priority:
 - 1 = Urgent (crashes / softlocks)
 - 2 = High
 - 3 = Medium
 - 4 = Low (pure visual)
-
 Player report:
 "${description}"
-
 Platform: ${platform}
 Reporter: ${reporter}
 `;
-
       let analysis;
       try {
         const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -169,7 +207,6 @@ Reporter: ${reporter}
             temperature: 0.15
           })
         });
-
         const aiData = await aiRes.json();
         const raw = aiData.choices[0].message.content;
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -187,7 +224,6 @@ Reporter: ${reporter}
 
       // ===== LINEAR DUPLICATE CHECK =====
       let existingLinearIssue = null;
-
       try {
         const searchQuery = `
           query {
@@ -202,7 +238,6 @@ Reporter: ${reporter}
             }
           }
         `;
-
         const searchRes = await fetch('https://api.linear.app/graphql', {
           method: 'POST',
           headers: {
@@ -211,28 +246,21 @@ Reporter: ${reporter}
           },
           body: JSON.stringify({ query: searchQuery })
         });
-
         const searchData = await searchRes.json();
         const openIssues = searchData.data?.issues?.nodes || [];
-
         if (openIssues.length > 0) {
           const issuesList = openIssues.map((issue, i) =>
             `${i + 1}. ID: ${issue.id}\nTitle: ${issue.title}\nDescription: ${(issue.description || '').slice(0, 300)}`
           ).join('\n\n');
-
           const duplicatePrompt = `
 You are a bug triage expert.
-
 NEW report:
 Title: ${analysis.cleanTitle}
 Summary: ${analysis.summary}
-
 Open issues:
 ${issuesList}
-
 Does the NEW report describe the same underlying bug as any existing issue?
 Focus on the core problem, not exact wording. Extra details do not make it a different bug.
-
 Reply ONLY with JSON:
 {
   "isDuplicate": true or false,
@@ -240,7 +268,6 @@ Reply ONLY with JSON:
   "reason": "short explanation"
 }
 `;
-
           const dupRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
@@ -253,11 +280,9 @@ Reply ONLY with JSON:
               temperature: 0.1
             })
           });
-
           const dupData = await dupRes.json();
           const dupRaw = dupData.choices[0].message.content;
           const dupJson = JSON.parse(dupRaw.match(/\{[\s\S]*\}/)[0]);
-
           if (dupJson.isDuplicate && dupJson.matchingIssueId) {
             existingLinearIssue = openIssues.find(i => i.id === dupJson.matchingIssueId);
             console.log('Duplicate detected:', dupJson.reason);
@@ -271,7 +296,6 @@ Reply ONLY with JSON:
       let linearIssueId = null;
       let linearIssueUrl = null;
       let isUpdate = false;
-
       try {
         const labelIds = [];
         if (analysis.type === 'Crash') {
@@ -289,7 +313,6 @@ Reply ONLY with JSON:
           linearIssueId = existingLinearIssue.id;
           linearIssueUrl = existingLinearIssue.url;
 
-          // Fetch the latest description first (more reliable)
           const getRes = await fetch('https://api.linear.app/graphql', {
             method: 'POST',
             headers: {
@@ -300,18 +323,14 @@ Reply ONLY with JSON:
               query: `query { issue(id: "${linearIssueId}") { description } }`
             })
           });
-
           const getData = await getRes.json();
           const currentDesc = getData.data?.issue?.description || existingLinearIssue.description || '';
-
           const updatedDescription = `${currentDesc}
-
 ---
 **Additional report by ${reporter}:**
 ${analysis.summary}
 **Platform:** ${platform}
 `;
-
           const updateRes = await fetch('https://api.linear.app/graphql', {
             method: 'POST',
             headers: {
@@ -330,14 +349,12 @@ ${analysis.summary}
               }
             })
           });
-
           const updateData = await updateRes.json();
           if (updateData.errors) {
             console.error('Linear update failed:', JSON.stringify(updateData.errors));
           } else {
             console.log('Successfully appended additional context to existing Linear issue');
           }
-
         } else {
           // ===== CREATE NEW ISSUE =====
           const createRes = await fetch('https://api.linear.app/graphql', {
@@ -366,10 +383,8 @@ ${analysis.summary}
               }
             })
           });
-
           const createData = await createRes.json();
           if (createData.errors) throw new Error(JSON.stringify(createData.errors));
-
           linearIssueId = createData.data.issueCreate.issue.id;
           linearIssueUrl = createData.data.issueCreate.issue.url;
         }
@@ -377,15 +392,11 @@ ${analysis.summary}
         // ===== CREATE CODECKS CARD (only for brand new issues) =====
         if (!isUpdate && linearIssueUrl) {
           const deckId = analysis.type === 'Crash' ? CRASH_DECK_ID : BUGS_DECK_ID;
-
           const codecksContent = `**${analysis.cleanTitle}**
-
 ${analysis.summary}
-
 ---
 🔗 **Linear Issue:** ${linearIssueUrl}
 `;
-
           const codecksRes = await fetch('https://api.codecks.io/dispatch/cards/create', {
             method: 'POST',
             headers: {
@@ -404,7 +415,6 @@ ${analysis.summary}
               priority: analysis.priority <= 2 ? 'a' : (analysis.priority === 3 ? 'b' : 'c')
             })
           });
-
           if (!codecksRes.ok) {
             console.error('Codecks create failed:', await codecksRes.text());
           }
@@ -413,27 +423,28 @@ ${analysis.summary}
         // ===== GIVE TEMPORARY UPLOAD PERMISSION + STORE PENDING =====
         try {
           const reportingChannel = await client.channels.fetch(REPORTING_CHANNEL_ID);
-
           await reportingChannel.permissionOverwrites.edit(reporterId, {
             SendMessages: true,
             AttachFiles: true,
             ViewChannel: true
           });
-
           if (pendingMedia.has(reporterId)) {
             clearTimeout(pendingMedia.get(reporterId).timeout);
           }
-
           pendingMedia.set(reporterId, {
             linearIssueId: linearIssueId,
             timeout: setTimeout(async () => {
               try {
-                await reportingChannel.permissionOverwrites.delete(reporterId);
+                const ch = await client.channels.fetch(REPORTING_CHANNEL_ID);
+                await ch.permissionOverwrites.delete(reporterId);
+                await ch.send({
+                  content: `<@${reporterId}> Your media upload window has expired. Submit a new report if you still need to attach files.`,
+                  allowedMentions: { users: [reporterId] }
+                }).catch(() => {});
               } catch (e) {}
               pendingMedia.delete(reporterId);
             }, 10 * 60 * 1000)
           });
-
           console.log(`Pending media set for user ${reporterId} → Linear issue ${linearIssueId}`);
         } catch (permErr) {
           console.error('Failed to set temporary permissions:', permErr);
@@ -442,12 +453,9 @@ ${analysis.summary}
         const replyText = isUpdate
           ? '✅ Thanks! This looks related to an existing report — your extra info has been added.\n\nYou can now upload screenshots or videos **in this channel**. They will be moved automatically.'
           : '✅ Thanks for the report!\n\nYou can now upload screenshots or videos **in this channel**. They will be moved automatically.';
-
         await interaction.editReply({ content: replyText });
-
       } catch (err) {
         console.error('Main processing error:', err);
-
         try {
           const fallbackChannel = await client.channels.fetch(FALLBACK_CHANNEL_ID);
           if (fallbackChannel) {
@@ -458,7 +466,6 @@ ${analysis.summary}
         } catch (e) {
           console.error('Fallback failed:', e);
         }
-
         await interaction.editReply({
           content: '✅ Thanks! We received your report. The team will look into it.'
         });
@@ -484,31 +491,58 @@ client.on(Events.MessageCreate, async (message) => {
   console.log(`Processing media from ${message.author.tag} for Linear issue ${pending.linearIssueId}`);
 
   try {
-    // 1. Re-upload files to permanent channel
+    const userText = message.content?.trim() || '';
+    const linearMediaLinks = [];
+    const discordFallbackLinks = [];
+
+    // Re-host to permanent Discord channel (reliable backup)
     const mediaChannel = await client.channels.fetch(MEDIA_CHANNEL_ID);
     const filesToUpload = [];
-
     for (const attachment of message.attachments.values()) {
       const response = await fetch(attachment.url);
       const buffer = Buffer.from(await response.arrayBuffer());
       filesToUpload.push({
         attachment: buffer,
-        name: attachment.name
+        name: attachment.name,
+        contentType: attachment.contentType || 'application/octet-stream'
       });
     }
 
     const permanentMessage = await mediaChannel.send({
-      content: `**Media from report**\nLinear ID: \`${pending.linearIssueId}\`\nUploaded by: <@${message.author.id}>`,
-      files: filesToUpload
+      content: `**Media from report**\nLinear ID: \`${pending.linearIssueId}\`\nUploaded by: <@${message.author.id}>${userText ? `\n\nUser note: ${userText}` : ''}`,
+      files: filesToUpload.map(f => ({ attachment: f.attachment, name: f.name }))
     });
 
-    // 2. Collect new permanent links
-    const mediaLinks = [];
     permanentMessage.attachments.forEach(att => {
-      mediaLinks.push(`- [${att.name}](${att.url})`);
+      discordFallbackLinks.push(`- [${att.name}](${att.url})`);
     });
 
-    // 3. Append media to Linear issue (works for both new and existing issues)
+    // Try Linear upload for each file
+    for (const file of filesToUpload) {
+      try {
+        const assetUrl = await uploadFileToLinear(file.attachment, file.name, file.contentType);
+        linearMediaLinks.push(`- [${file.name}](${assetUrl})`);
+        console.log(`Uploaded ${file.name} to Linear`);
+      } catch (uploadErr) {
+        console.warn(`Linear upload failed for ${file.name}, using Discord fallback:`, uploadErr.message);
+      }
+    }
+
+    // Build media section
+    let mediaSection = '';
+    if (userText) {
+      mediaSection += `**User note with media:**\n${userText}\n\n`;
+    }
+    if (linearMediaLinks.length > 0) {
+      mediaSection += `**Media (Linear-hosted):**\n${linearMediaLinks.join('\n')}\n`;
+    }
+    if (discordFallbackLinks.length > 0 && linearMediaLinks.length < filesToUpload.length) {
+      mediaSection += `\n**Media (Discord fallback):**\n${discordFallbackLinks.join('\n')}`;
+    } else if (linearMediaLinks.length === 0) {
+      mediaSection += `**Media (Discord):**\n${discordFallbackLinks.join('\n')}`;
+    }
+
+    // Append to Linear issue
     const getRes = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
       headers: {
@@ -519,15 +553,9 @@ client.on(Events.MessageCreate, async (message) => {
         query: `query { issue(id: "${pending.linearIssueId}") { description } }`
       })
     });
-
     const getData = await getRes.json();
     const currentDesc = getData.data?.issue?.description || '';
-
-    const newDesc = `${currentDesc}
-
----
-**Media:**
-${mediaLinks.join('\n')}`;
+    const newDesc = `${currentDesc}\n\n---\n${mediaSection.trim()}`;
 
     const updateRes = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
@@ -555,20 +583,16 @@ ${mediaLinks.join('\n')}`;
       console.log('Media successfully added to Linear issue');
     }
 
-    // 4. Delete original message
+    // Cleanup
     await message.delete().catch(() => {});
-
-    // 5. Revoke temporary permission
     try {
       const reportingChannel = await client.channels.fetch(REPORTING_CHANNEL_ID);
       await reportingChannel.permissionOverwrites.delete(message.author.id);
     } catch (e) {}
-
     clearTimeout(pending.timeout);
     pendingMedia.delete(message.author.id);
 
-    await permanentMessage.reply('✅ Media saved and added to the Linear issue.');
-
+    await permanentMessage.reply('✅ Media saved. Linear-hosted links preferred where possible.');
   } catch (err) {
     console.error('Media handling error:', err);
     await message.reply('⚠️ Something went wrong while processing the media.').catch(() => {});
